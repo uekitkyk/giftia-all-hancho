@@ -10,21 +10,31 @@
 import os
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
+import recommend
 from database import fetch_all
 
 load_dotenv()  # .env を読む（DB の接続情報・CORS の許可）
 
-app = FastAPI(title="Giftia Search API（2週目）")
+app = FastAPI(title="Giftia Search API（2週目）+ 思い出しガイド（phase1）")
 
 # ── CORS ───────────────────────────────────────
 # 画面（http://localhost:3000）と API（http://localhost:8000）は別のアプリ＝オリジンが違う。
 # ブラウザは既定で「別オリジンへの通信」を止めるので、API 側が「この画面からは受け付ける」と宣言する。
 # 許可する画面の URL は .env の CORS_ORIGINS に書く（カンマ区切りで複数可）。空なら何も許可しない。
-origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
-app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["GET"], allow_headers=["*"])
+# Phase1の推薦APIはPOSTで受けるので、”POST”を足した（GETだけだとブラウザが止めるため）
+origins = [
+    o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/api/health")
@@ -36,9 +46,13 @@ def health():
 
 @app.get("/api/search")
 def search(
-    q: str = Query(default="", description="キーワード（空白区切りで複数。すべてを含む商品）"),
+    q: str = Query(
+        default="", description="キーワード（空白区切りで複数。すべてを含む商品）"
+    ),
     category: str = Query(default="", description="カテゴリー（空ならすべて）"),
-    indiv_wrap: bool = Query(default=False, description="true なら、説明文に「個包装」とある商品だけ"),
+    indiv_wrap: bool = Query(
+        default=False, description="true なら、説明文に「個包装」とある商品だけ"
+    ),
     price_min: int | None = Query(default=None, ge=0, description="価格の下限（以上）"),
     price_max: int | None = Query(default=None, ge=0, description="価格の上限（以下）"),
     limit: int = Query(default=20, ge=1, le=100, description="返す件数"),
@@ -53,8 +67,12 @@ def search(
         where.append("category = %s")
         params.append(category)  # 【穴2】%s に入れる値（受け取ったカテゴリー）
     if indiv_wrap:
-        where.append("description LIKE %s")  # 「個包装」は列がないので、説明文に書いてあるかで見る
-        params.append("%個包装%")  # 【穴3】「個包装」をどこかに含む、という LIKE のパターン
+        where.append(
+            "description LIKE %s"
+        )  # 「個包装」は列がないので、説明文に書いてあるかで見る
+        params.append(
+            "%個包装%"
+        )  # 【穴3】「個包装」をどこかに含む、という LIKE のパターン
     if price_min is not None:
         where.append("price >= %s")
         params.append(price_min)
@@ -64,7 +82,9 @@ def search(
     condition = " AND ".join(where)
 
     # ② 件数と、人気順の上位 limit 件を取る
-    total = fetch_all(f"SELECT COUNT(*) AS n FROM products WHERE {condition}", tuple(params))[0]["n"]
+    total = fetch_all(
+        f"SELECT COUNT(*) AS n FROM products WHERE {condition}", tuple(params)
+    )[0]["n"]
     rows = fetch_all(
         f"""SELECT product_id, category, brand, product_name, price, rating, review_count
             FROM products WHERE {condition}
@@ -82,8 +102,57 @@ def to_gift(r: dict) -> dict:
         "id": r["product_id"],
         "category": r["category"],
         "brand": r["brand"],
-        "name": r["product_name"],  # 【穴4】商品名の列名（データ定義.md の products を見る）
+        "name": r[
+            "product_name"
+        ],  # 【穴4】商品名の列名（データ定義.md の products を見る）
         "price": r["price"],
-        "rating": float(r["rating"]) if r["rating"] is not None else 0,  # レビューなしは 0
+        "rating": (
+            float(r["rating"]) if r["rating"] is not None else 0
+        ),  # レビューなしは 0
         "reviewCount": r["review_count"],
     }
+
+
+# ーーPhase1：思い出しガイドの推薦APIーー
+# 中身はrecommend.pyに書いてあるので、ここでは呼び出すだけ。現在はダミーデータで動くようにする。
+
+MAX_ANSWERS = 5  # 1問1択×5問
+
+
+class RecommendRequest(BaseModel):
+    """POST /api/recommendationで受け取るJSONの型。例：{"choiceIds":[101, 205, 310]}"""
+
+    choiceIds: list[int]  # 選択肢のIDのリスト（1問1択×5問）
+
+
+@app.get("/api/questions")
+def questions():
+    """思い出しガイドの質問と選択肢を表示順に返す。現在はダミーデータ"""
+    return {"questions": recommend.get_questions()}
+
+
+@app.post("/api/recommendations")
+def recommendations(body: RecommendRequest):
+    """選ばれた選択肢IDから、タグの一致数が多い順に商品を返す。（要件定義書のFR-01・FR-03）
+    候補が0件の時は{"total":0,"results":[]}を返す。(画面側で「見つからない」と表示する)"""
+    choice_Ids = list(dict.fromkeys(body.choiceIds))  # 重複を除く
+    if not choice_Ids:
+        raise HTTPException(
+            status_code=422, detail="choiceIdsが空です。選択肢IDを1つ以上送ってください"
+        )
+    if len(choice_Ids) > MAX_ANSWERS:
+        raise HTTPException(
+            status_code=422, detail=f"choiceIdsが{MAX_ANSWERS}件を超えています。"
+        )
+
+    rows = recommend.recommend(choice_Ids)
+    results = [
+        {
+            **to_gift(r),  # 商品情報は/api/searchと同じ形
+            "score": r["score"],  # 一致したタグの種類
+            "matchedTags": r["matched_tags"],  # 一致したタグの種類のリスト
+            "reason": None,  # 推薦理由（FR-06）, phase2以降で追加するまではnull。
+        }
+        for r in rows
+    ]
+    return {"total": len(results), "results": results}
