@@ -7,6 +7,7 @@
 import { useState } from "react";
 import ResultCard from "./ResultCard";
 import { searchGifts, type Gift } from "@/lib/api";
+import Link from "next/link";
 
 export default function Home() {
   // ① 状態（変化するデータ）を覚える箱
@@ -37,7 +38,30 @@ export default function Home() {
   // ③ 画面
   return (
     <main className="page">
-      <header className="header"><h1>Giftia</h1></header>
+      
+      <header
+        className="header"
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+        }}
+      >
+        <h1>Giftia</h1>
+        <Link
+          href="/guide"
+          style={{
+            backgroundColor: "#173b63",
+            color: "white",
+            padding: "10px 16px",
+            borderRadius: "8px",
+            textDecoration: "none",
+            fontSize: "14px",
+          }}
+        >
+          思い出しガイド
+        </Link>
+      </header>
 
       {/* タブ：state(mode)＋条件で出し分ける */}
       <nav className="modes">
